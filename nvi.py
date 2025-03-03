@@ -33,11 +33,12 @@ def get_temp_email():
     """Mendapatkan email sementara dari generator.email"""
     try:
         key = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=2))
+        key2 = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
         response = requests.get(f"https://generator.email/search.php?key={key}", timeout=10)
         if response.ok:
             domains = response.json()
             if domains:
-                email = f"test{random.randint(1000, 9999)}@{random.choice(domains)}"
+                email = f"{key2}{random.randint(10, 999)}@{random.choice(domains)}"
                 logging.info(f"[≈] Email sementara: {email}")
                 return email
     except Exception as e:
