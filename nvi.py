@@ -10,186 +10,159 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import random
+import string
+import asyncio
+import httpx
+from bs4 import BeautifulSoup
 
 # Konfigurasi logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("registration.log"),  # Log ke file
-        logging.StreamHandler()  # Log ke konsol
+        logging.FileHandler("registration.log"),
+        logging.StreamHandler()
     ]
 )
 
-# API GuerrillaMail
-GUERRILLAMAIL_API = "https://api.guerrillamail.com/ajax.php"
+def generate_email(domain):
+    first_name = ''.join(random.choices(string.ascii_lowercase, k=5))
+    last_name = ''.join(random.choices(string.ascii_lowercase, k=5))
+    random_nums = ''.join(random.choices(string.digits, k=3))
+    email = f"{first_name}{last_name}{random_nums}@{domain}"
+    logging.info(f"📧 Generated email: {email}")
+    return email
 
-def get_temp_email():
-    """Mendapatkan email sementara dari GuerrillaMail"""
-    logging.info("Mencoba mendapatkan email sementara dari GuerrillaMail...")
-    try:
-        response = requests.get(f"{GUERRILLAMAIL_API}?f=get_email_address")
-        if response.status_code != 200:
-            logging.error(f"❌ Gagal mendapatkan email. Kode status: {response.status_code}")
-            return None, None
+async def get_domains():
+    retries = 3
+    for attempt in range(retries):
+        try:
+            key = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=2))
+            response = requests.get(f"https://generator.email/search.php?key={key}", timeout=10)
+            
+            if response.ok:
+                json_data = response.json()
+                if isinstance(json_data, list) and json_data:
+                    return json_data
+        except requests.exceptions.RequestException as error:
+            logging.error(f"Error fetching domains (Attempt {attempt + 1}/{retries}): {error}")
+        await asyncio.sleep(2)
+    return []
 
-        email_data = response.json()
-        email_address = email_data["email_addr"]
-        sid_token = email_data["sid_token"]
+async def get_verification_link(email):
+    email_username, email_domain = email.split('@')
+    cookies = {'embx': f'[%22{email}%22]', 'surl': f'{email_domain}/{email_username}'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        for attempt in range(5):
+            logging.info(f"⏳ Checking for verification email (Attempt {attempt + 1}/5)...")
+            response = await client.get(f"https://generator.email/inbox1/", headers=headers, cookies=cookies)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                email_body = soup.prettify()
+                match = re.search(r'<a\s+href=["\'](https?://[^"\']+)["\'][^>]*>\s*this verification link\s*</a>', email_body, re.IGNORECASE)
+                if match:
+                    verification_link = match.group(1)
+                    logging.info(f"🔗 Verification link found: {verification_link}")
+                    return verification_link
+            await asyncio.sleep(10)
+    logging.error("❌ Verification email not found.")
+    return None
 
-        logging.info(f"📧 Email sementara: {email_address}")
-        return email_address, sid_token
-    except Exception as e:
-        logging.error(f"❌ Terjadi kesalahan saat mendapatkan email: {e}")
-        return None, None
+async def get_temp_email():
+    domains = await get_domains()
+    if not domains:
+        logging.error("❌ No available email domains.")
+        return None
+    domain = random.choice(domains)
+    return generate_email(domain)
 
 def register_account_selenium(email, password, referral_code):
-    """Mendaftar akun di website tanpa CAPTCHA"""
     if not email:
-        logging.warning("⚠️ Tidak bisa mendaftar karena email tidak diperoleh.")
+        logging.warning("⚠️ Cannot register, email not generated.")
         return
-
-    logging.info("Mengatur browser Chrome dalam mode headless...")
+    
+    logging.info("Starting Chrome in headless mode...")
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Mode headless (tanpa GUI)
-    chrome_options.add_argument("--no-sandbox")  # Tambahan untuk lingkungan tanpa GUI
-    chrome_options.add_argument("--disable-dev-shm-usage")  # Mengatasi masalah resource
-
-    # Buat direktori data pengguna yang unik
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     user_data_dir = tempfile.mkdtemp()
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-
+    
     try:
         driver = webdriver.Chrome(options=chrome_options)
-        logging.info("Membuka halaman pendaftaran...")
-        driver.get("https://dataquest.nvg8.io//signup?ref=1668969")
-
-        logging.info("Mengisi formulir pendaftaran...")
+        logging.info("Opening registration page...")
+        driver.get("https://dataquest.nvg8.io/signup")
+        
+        logging.info("Filling registration form...")
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "email"))).send_keys(email)
         driver.find_element(By.NAME, "password").send_keys(password)
+        driver.find_element(By.NAME, "referral").send_keys(referral_code)
         
-        logging.info("Mengklik tombol pendaftaran...")
+        logging.info("Clicking register button...")
         sign_up_button = WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
         )
         driver.execute_script("arguments[0].scrollIntoView();", sign_up_button)
         time.sleep(1)
         sign_up_button.click()
-
-        logging.info("✅ Akun berhasil didaftarkan, menunggu email verifikasi...")
+        
+        logging.info("✅ Registration successful, waiting for verification email...")
         time.sleep(10)
     except Exception as e:
-        logging.error(f"❌ Terjadi kesalahan saat mendaftar: {e}")
+        logging.error(f"❌ Registration error: {e}")
     finally:
         if 'driver' in locals():
             driver.quit()
-        # Hapus direktori data pengguna beserta isinya
         if os.path.exists(user_data_dir):
-            shutil.rmtree(user_data_dir)  # Menggunakan shutil.rmtree() untuk menghapus direktori dan isinya
-
-def get_verification_link(sid_token, email_address):
-    """Mendapatkan link verifikasi dari email menggunakan GuerrillaMail"""
-    if not sid_token or not email_address:
-        logging.warning("⚠️ Token atau alamat email tidak valid. Gagal mengambil email verifikasi.")
-        return None
-
-    retries = 5
-    for attempt in range(retries):
-        logging.info(f"⏳ Mencoba mendapatkan email verifikasi (Percobaan {attempt + 1}/{retries})...")
-        time.sleep(10)  # Tunggu email masuk
-
-        params = {
-            "f": "get_email_list",
-            "sid_token": sid_token,
-            "offset": 0,
-            "seq": 0
-        }
-        response = requests.get(GUERRILLAMAIL_API, params=params)
-
-        if response.status_code != 200:
-            logging.warning(f"⚠️ HTTP Error {response.status_code} saat mengambil email.")
-            continue
-
-        try:
-            email_list = response.json()["list"]
-            if email_list:
-                email_id = email_list[0]["mail_id"]
-                params = {
-                    "f": "fetch_email",
-                    "sid_token": sid_token,
-                    "email_id": email_id
-                }
-                response = requests.get(GUERRILLAMAIL_API, params=params)
-                if response.status_code != 200:
-                    logging.warning(f"⚠️ HTTP Error {response.status_code} saat membaca email.")
-                    continue
-
-                mail_content = response.json()["mail_body"]
-                match = re.search(r"https://[^\" ]+", mail_content)
-                if match:
-                    logging.info(f"🔗 Link verifikasi ditemukan: {match.group(0)}")
-                    return match.group(0)
-
-        except Exception as e:
-            logging.error(f"❌ Terjadi kesalahan saat memproses email: {e}")
-
-    logging.error("❌ Gagal mendapatkan email verifikasi setelah beberapa percobaan.")
-    return None
+            shutil.rmtree(user_data_dir)
 
 def verify_account(verification_link):
-    """Membuka link verifikasi untuk menyelesaikan proses pendaftaran"""
     if not verification_link:
-        logging.warning("⚠️ Tidak ada link verifikasi, tidak bisa lanjut.")
+        logging.warning("⚠️ No verification link, cannot proceed.")
         return
-
-    logging.info("Mengatur browser Chrome dalam mode headless...")
+    
+    logging.info("Opening verification link...")
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-
-    # Buat direktori data pengguna yang unik
     user_data_dir = tempfile.mkdtemp()
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-
+    
     try:
         driver = webdriver.Chrome(options=chrome_options)
-        logging.info("Membuka link verifikasi...")
         driver.get(verification_link)
-        logging.info("✅ Akun berhasil diverifikasi!")
+        logging.info("✅ Account verified!")
         time.sleep(5)
     except Exception as e:
-        logging.error(f"❌ Terjadi kesalahan saat memverifikasi akun: {e}")
+        logging.error(f"❌ Verification error: {e}")
     finally:
         if 'driver' in locals():
             driver.quit()
-        # Hapus direktori data pengguna beserta isinya
         if os.path.exists(user_data_dir):
             shutil.rmtree(user_data_dir)
 
 if __name__ == "__main__":
-    while True:
-        jumlah_pendaftaran_input = input("Masukkan jumlah pendaftaran yang diinginkan: ")
-        if jumlah_pendaftaran_input.isdigit():
-            jumlah_pendaftaran = int(jumlah_pendaftaran_input)
-            break
-        logging.error("❌ Harap masukkan angka yang valid.")
-
-    referral_code = input("Masukkan referral code: ")
-
+    referral_code = input("Enter referral code: ")
+    jumlah_pendaftaran = int(input("Enter number of registrations: "))
+    
     for _ in range(jumlah_pendaftaran):
-        logging.info("Memulai proses pendaftaran akun...")
-        email, sid_token = get_temp_email()
+        logging.info("Starting registration process...")
+        email = asyncio.run(get_temp_email())
         password = "Test@1234"
-
-        if email and sid_token:
-            logging.info(f"🚀 Mendaftar dengan email: {email}")
+        
+        if email:
             register_account_selenium(email, password, referral_code)
-
-            verification_link = get_verification_link(sid_token, email)
+            verification_link = asyncio.run(get_verification_link(email))
             if verification_link:
                 verify_account(verification_link)
             else:
-                logging.error("⚠️ Pendaftaran gagal, tidak ada email verifikasi.")
+                logging.error("⚠️ Registration failed, no verification email.")
         else:
-            logging.error("❌ Gagal mendapatkan email sementara. Proses dihentikan.")
+            logging.error("❌ Failed to get temporary email. Process halted.")
